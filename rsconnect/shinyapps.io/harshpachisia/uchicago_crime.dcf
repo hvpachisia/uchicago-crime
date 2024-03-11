@@ -1,0 +1,13 @@
+name: uchicago_crime
+title: uchicago_crime
+username: harshpachisia
+account: harshpachisia
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 11372930
+bundleId: 8314900
+url: https://harshpachisia.shinyapps.io/uchicago_crime/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE
+ignoredFiles: cleaning_data.R|heatmap_generation.R|notes.md|poi_map.R|README.md|static_graphs.html|static_graphs.Rmd|visualizations.Rmd

@@ -1,0 +1,12 @@
+name: uchicago-crime-notebook
+title: uchicago-crime-notebook
+username: harshpachisia
+account: harshpachisia
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 11399930
+bundleId: 8336687
+url: https://harshpachisia.shinyapps.io/uchicago-crime-notebook/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE

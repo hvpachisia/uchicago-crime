@@ -1,0 +1,544 @@
+---
+title: "Source Code for Article- Rides to Safety: Scrutinizing Crime in Hyde Park and Campus Transits"
+author: "Harsh Vardhan Pachisia"
+date: "`r Sys.Date()`"
+output: html_document
+runtime: shiny
+---
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#packages needed
+library('ggplot2')
+library('tidyverse')
+library('lubridate')
+library(dplyr)
+library(tidyr)
+library(gridExtra)
+library(grid)
+library(leaflet)
+library(leaflet.extras)
+library(shiny)
+library(sf) 
+library(shiny)
+```
+
+```{r}
+# getting crime data in the UChicago area (community areas: Hyde Park)
+uchicago_crime<- read.csv('data/uchicago_crime.csv', header = TRUE)
+```
+
+```{r}
+# getting a date column and subsetting data to only include crimes till end-2023 (removing crimes in Jan 2024)
+uchicago_crime$date_of_crime <- as.Date(uchicago_crime$Date, format = "%m/%d/%Y") 
+uchicago_crime<- uchicago_crime %>% 
+  subset(date_of_crime <= "2023-12-31" & date_of_crime >= '2014-01-01')
+
+# adding columns for time of day, month, and year
+uchicago_crime$time_of_day <- hour(strptime(uchicago_crime$Date, "%m/%d/%Y %I:%M:%S %p"))
+uchicago_crime$month <- months(strptime(uchicago_crime$Date, "%m/%d/%Y %I:%M:%S %p"))
+uchicago_crime$year <- year(strptime(uchicago_crime$Date, "%m/%d/%Y %I:%M:%S %p"))
+
+# Store bounding box coordinates
+hp_bb <- c(
+  left = -87.608221,
+  bottom = 41.783249,
+  right = -87.577643,
+  top = 41.803038
+)
+
+uchicago_crime <- uchicago_crime %>%
+  filter(Longitude >= hp_bb["left"], Longitude <= hp_bb["right"],
+         Latitude >= hp_bb["bottom"], Latitude <= hp_bb["top"])
+
+# filtering to only Hyde Park as the UChicago area
+uchicago_crime <- uchicago_crime %>% 
+  rename(
+    id = ID,
+    date = Date,
+    primary_type = Primary.Type,
+    time_of_day = time_of_day,
+    location = Location.Description,
+    latitude = Latitude,
+    longitude = Longitude
+  ) %>% 
+  filter(!is.na(time_of_day) & !is.na(primary_type)) %>%
+  select(time_of_day, primary_type, location, id, date, month, year, latitude, longitude)
+```
+
+# Analysis
+
+### What crimes happen in Hyde Park?
+
+#### Crimes in Hyde Park
+
+```{r}
+# getting the top 10 crimes 
+top_crimes <- uchicago_crime %>%
+  count(primary_type) %>%
+  top_n(9, n) %>%
+  pull(primary_type) 
+
+# plugging the rest into an 'Other Crimes' variable
+uchicago_crime <- uchicago_crime %>%
+  mutate(primary_type = ifelse(primary_type %in% top_crimes, primary_type, 'OTHER CRIMES'))
+
+# getting the frequency of each crime
+crime_type_frequencies <- uchicago_crime %>%
+  count(primary_type) %>%
+  arrange(desc(n))
+
+# to allow for better readability in the plot
+crime_type_frequencies$primary_type <- str_wrap(crime_type_frequencies$primary_type, width = 30)
+
+# plot
+ggplot(crime_type_frequencies, aes(x = reorder(primary_type, n), y = n)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Frequency of Crime Types in Hyde Park (Jan 2014 - Dec 2023)",
+       subtitle = "Top 10 crime types shown",
+       caption = "Note: 'Other crimes' contains all crimes that had less than 350 occurrences. 'Other Offense' is a distinct category in the dataset.\n Source: City of Chicago Crime Data",
+       x = "Type of Crime",
+       y = "Frequency of Crime") +
+  theme(plot.title = element_text(size = 13),
+        plot.subtitle = element_text(size = 7),
+        plot.caption = element_text(size = 6))
+```
+
+#### Crime types over time
+
+```{r}
+crime_counts <- readRDS("data/crime_counts.rds")
+
+inputPanel(
+  selectInput("crime_type", "Select Crime Types:",
+            choices = unique(crime_counts$primary_type),
+            selected = c("theft",'battery', 'criminal damage', 'deceptive practice', 'motor vehicle theft'),
+            multiple = TRUE)
+)
+plotOutput("density")
+
+output$density <- renderPlot({
+  specificCrimes <- tolower(input$crime_type)
+
+  d <- filter(crime_counts, primary_type %in% specificCrimes) %>% 
+    mutate(label = if_else(year == max(year), as.character(primary_type), NA_character_))
+  
+  if (nrow(d) > 0) {
+    ggplot(d, aes(x=year, y=count, color=primary_type)) +
+      geom_line() +
+      labs(title = "Crimes over years", x = "Year", y = "Number of Crimes", color = "Crime Type") +
+      scale_color_viridis_d() +
+      theme_bw()
+  } else {
+    ggplot() + 
+      annotate("text", x = 1, y = 1, label = "No data available for selected crime types", size = 6, hjust = 0.5, vjust = 0.5)
+  }
+})
+```
+
+### When do crimes happen? 
+
+```{r}
+
+# Calculate days in each period
+days_in_year <- 365 
+days_in_summer <- 31 + 31 + 30 # June, July, August
+days_in_school_year <- days_in_year - days_in_summer
+
+# Creating two datasets: one including theft and one excluding theft
+crime_heatmap_with_theft <- uchicago_crime %>% 
+  mutate(summer = ifelse(month %in% c("June", "July", "August"), "Summer", "School Year")) %>%
+  group_by(time_of_day, summer, primary_type) %>% 
+  summarise(crime_count = n()) %>%
+  mutate(crime_count_normalized = ifelse(summer == "Summer", 
+                                         crime_count / days_in_summer,
+                                         crime_count / days_in_school_year)) %>%
+  select(-crime_count) %>% 
+  top_n(15, crime_count_normalized) %>%
+  spread(key = primary_type, value = crime_count_normalized, fill = 0)
+
+    
+crime_heatmap_without_theft <- uchicago_crime %>% 
+  filter(primary_type != "THEFT") %>%
+  mutate(summer = ifelse(month %in% c("June", "July", "August"), "Summer", "School Year")) %>%
+  group_by(time_of_day, summer, primary_type) %>% 
+  summarise(crime_count = n()) %>%
+  mutate(crime_count_normalized = ifelse(summer == "Summer", 
+                                         crime_count / days_in_summer,
+                                         crime_count / days_in_school_year)) %>%
+  select(-crime_count) %>% 
+  top_n(15, crime_count_normalized) %>%
+  spread(key = primary_type, value = crime_count_normalized, fill = 0)
+
+# Converting the data to long format for ggplot
+long_crime_data_with_theft <- crime_heatmap_with_theft %>% 
+  gather(key = primary_type, value = crime_count_normalized, -c(time_of_day, summer))
+
+long_crime_data_without_theft <- crime_heatmap_without_theft %>% 
+  gather(key = primary_type, value = crime_count_normalized, -c(time_of_day, summer))
+
+unique_values_with_theft <- unique(long_crime_data_with_theft$time_of_day)
+
+time_levels <- as.character(0:23)
+
+# Convert time_of_day to a factor
+long_crime_data_with_theft$time_of_day <- factor(long_crime_data_with_theft$time_of_day, 
+                                                 levels = time_levels, 
+                                                 ordered = TRUE)
+
+# Convert time_of_day to a factor
+long_crime_data_without_theft$time_of_day <- factor(long_crime_data_without_theft$time_of_day, 
+                                                    levels = time_levels, 
+                                                    ordered = TRUE)
+
+# Defining custom breaks and labels for the x-axis
+custom_breaks <- time_levels[seq(1, 23, 5)]  # Every 5 hours starting from 0
+custom_labels <- format(strptime(custom_breaks, format = "%H"), format = "%I %p")  # Convert to 12-hour AM/PM format
+
+# Creating the heatmap for data including theft
+plot_with_theft <- ggplot(long_crime_data_with_theft, 
+                          aes(x = time_of_day, y = primary_type, fill = crime_count_normalized)) +
+  geom_tile() +
+  scale_fill_gradient(low = "floralwhite", high = "steelblue", name = "Normalized Crime Count") +
+  scale_x_discrete(breaks = custom_breaks, labels = custom_labels) +
+  facet_wrap(~summer, scales = "free") +
+  theme_minimal() +
+   theme(
+    plot.title = element_text(size = 15, hjust = 0.5),
+    plot.subtitle = element_text(size = 9, hjust = 0.5),
+  ) +
+  labs(title = "Crime Types vs Time of Day (with Theft)",
+        subtitle = "Normalized counts, with Theft",
+       x = "Hour of Day",
+       y = "Crime Type")
+
+# Creating the heatmap for data excluding theft
+plot_without_theft <- ggplot(long_crime_data_without_theft, 
+                             aes(x = time_of_day, y = primary_type, fill = crime_count_normalized)) +
+  geom_tile() +
+  scale_fill_gradient(low = "floralwhite", high = "steelblue", name = "Normalized Crime Count") +
+  scale_x_discrete(breaks = custom_breaks, labels = custom_labels) +
+  facet_wrap(~summer, scales = "free") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 15, hjust = 0.5),
+    plot.subtitle = element_text(size = 9, hjust = 0.5),
+  ) +
+  labs(title = "Crime Types vs Time of Day (without Theft)",
+       subtitle = "Normalized counts, without Theft",
+       x = "Hour of Day",
+       y = "Crime Type",
+       fill = "Normalized Crime Count")
+
+# Create a blank grob (graphical object) for spacing
+blank_grob <- grobTree(rectGrob(gp = gpar(col = NA)))
+
+# Combine the plots with space in between
+grid.arrange(
+  plot_with_theft,
+  blank_grob,  # Add blank grob for spacing
+  plot_without_theft,
+  ncol = 1,    # Arrange plots in one column
+  heights = c(1, 0.05, 1)  # Adjust the height of each element (plots and spacing)
+)
+```
+
+### Where do crimes happen?
+
+The geographical hot spots of crime in Hyde Park can be seen via the interactive map below.
+
+```{r}
+# Load data 
+crime_lat_long <- readRDS("data/crime_lat_long.rds")
+university_poi <- readRDS("data/university_poi.rds")
+residence_poi <- readRDS("data/residence_poi.rds")
+bus_routes <- readRDS("data/bus_routes.rds")
+uchicago_shuttles <- readRDS("data/uchicago_shuttles.rds")
+
+inputPanel(
+  sliderInput("year", "Year", 
+              min = 2014, max = 2023,
+              value = 2023, step = 1, sep = ""),
+   checkboxInput("showCampus", "Major Campus Buildings", value = TRUE),
+  checkboxInput("showResidence", "Major Residential Buildings", value = TRUE)
+)
+
+leafletOutput("hydeParkMap1", width = "100%", height = "500px")
+
+
+ # have to generate heatmaps here since cant do spatial stuff outside, doesn't deploy
+  years <- unique(crime_lat_long$year)
+  crime_lat_long <- crime_lat_long %>% 
+    # count of crime greater than or equal to 3
+    filter(count >=3)
+  
+
+  # Pre-generate heatmaps for each year
+  pre_generated_maps <- lapply(years, function(y) {
+    data_year <- crime_lat_long[crime_lat_long$year == y, ]
+    m <- leaflet(data_year) %>%
+      addProviderTiles(providers$CartoDB.Positron) %>%
+      addHeatmap(lng = ~longitude, lat = ~latitude, intensity = ~count, radius = 15, blur = 20, max = 0.05
+                 )
+    saveRDS(m, paste0("data/heatmap_", y, ".rds"))
+  })
+
+  output$hydeParkMap1 <- renderLeaflet({
+    year_selected <- input$year
+    heatmap_file <- paste0("data/heatmap_", year_selected, ".rds")
+    
+    map <- if (file.exists(heatmap_file)) {
+      readRDS(heatmap_file)
+    } else {
+      leaflet() %>%
+        addProviderTiles(providers$CartoDB.Positron) %>%
+        setView(lng = -87.5903, lat = 41.7943, zoom = 14)
+    }
+    
+    # Conditionally add the POI layer based on user input
+    if (input$showCampus) {
+      map <- map %>%
+        addAwesomeMarkers(
+          lng = university_poi$longitude, 
+          lat = university_poi$latitude, 
+          popup = university_poi$name,
+          icon = awesomeIcons(
+            icon = 'university', 
+            iconColor = 'white', 
+            library = 'fa', 
+            markerColor = 'blue'
+          )
+        )
+        
+    }
+    # Conditionally add the POI layer based on user input
+    if (input$showResidence) {
+      map <- map %>%
+        addAwesomeMarkers(
+          lng = residence_poi$longitude, 
+          lat = residence_poi$latitude, 
+          popup = residence_poi$name,
+          icon = awesomeIcons(
+            icon = 'home', 
+            iconColor = 'white', 
+            library = 'fa', 
+            markerColor = 'blue'
+          )
+        )
+    }
+    color_palette <- colorNumeric(
+      palette = c('#0000FF', '#00FFFF', '#00FF00', '#FFFF00', '#FFA500', '#FF0000'),
+      domain = crime_lat_long$count
+    )
+    leafletProxy("hydeParkMap1", data = crime_lat_long) %>% 
+      addLegend(position = "bottomright",
+                title = "Number of Crimes",
+                pal = color_palette,
+                values = crime_lat_long$count,
+                opacity = 1)
+    
+    map
+}
+)
+```
+
+
+```{r}
+outside_locations <- c("PARKING LOT / GARAGE (NON RESIDENTIAL)","SIDEWALK","STREET")
+
+total_crime_counts <- uchicago_crime %>%
+  group_by(location)  %>%
+  count(location) %>% 
+  arrange(desc(n)) %>% 
+  ungroup() %>% 
+  top_n(10, n)
+
+# Calculating the total number of crimes
+total_crimes <- sum(total_crime_counts$n)
+
+# Adding a new column for the percentage
+total_crime_counts <- total_crime_counts %>%
+  mutate(percentage = n / total_crimes * 100,
+         label = paste(location, sprintf("%.1f%%", percentage),sep ="\n"))
+
+
+total_crime_counts <- total_crime_counts %>%
+  mutate(location = ifelse(location %in% c("APARTMENT", "RESIDENCE"), "APARTMENT/RESIDENCE", location)) %>%
+  mutate(location = ifelse(!(location %in% outside_locations) & !(location %in% c("APARTMENT/RESIDENCE")), "OTHER LOCATIONS", location)) %>% 
+  mutate(location = ifelse(location %in% c("PARKING LOT / GARAGE (NON RESIDENTIAL)"), "PARKING LOT", location)) %>% 
+  group_by(location) %>%
+  summarise(n = sum(n)) %>% 
+  arrange(desc(n)) %>% 
+  mutate(percentage = n / total_crimes * 100,
+         label = paste(location, sprintf("%.1f%%", percentage),sep ="\n"))
+
+
+outside_locations <- c("PARKING LOT","SIDEWALK","STREET")
+
+# Adding a new column to indicate location
+total_crime_counts$crime_location <- ifelse(total_crime_counts$location %in% 
+                                       outside_locations, 
+                                       "OUTDOOR", "INDOOR")
+
+ggplot(total_crime_counts, aes(x = reorder(location, percentage), y = percentage, fill = crime_location)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = c("OUTDOOR" = "steelblue", "INDOOR" = "maroon4")) +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Nearly 50% of crime in Hyde Park occurs outdoors",
+       subtitle = "Top 5 locations for crimes around UChicago (Jan 2014 - Dec 2023) shown",
+       caption = "Other locations' contains all locations that had less than 1000 occurrences\n Source: City of Chicago Crime Data",
+       x = "Location of Crime",
+       y = "Percent of total crime") +
+  theme(plot.title = element_text(size = 15),
+        plot.subtitle = element_text(size = 7),
+        plot.caption = element_text(size = 6),
+        legend.position="bottom",
+        legend.title = element_blank())
+```
+
+
+### What are the effects of safety transit programs?
+
+```{r}
+# counting outdoor and indoor crimes by year
+outside_crimes_by_year <- uchicago_crime %>% 
+  filter(location %in% outside_locations) %>% 
+  select(primary_type,location, year, month, time_of_day) %>% 
+  count(year)
+
+inside_crimes_by_year <- uchicago_crime %>% 
+  filter(!(location %in% outside_locations)) %>% 
+  select(primary_type, location, year, month, time_of_day) %>% 
+  count(year)
+
+# Combining the data sets
+crimes_by_year <- bind_rows(
+  mutate(outside_crimes_by_year, crime_location = "Outdoor"),
+  mutate(inside_crimes_by_year, crime_location = "Indoor")
+)
+#Plotting the combined data
+ggplot(crimes_by_year, aes(x = year, y = n, color = crime_location)) +
+  geom_line(data = crimes_by_year %>% filter(crime_location == "Outdoor"), size = 1) +
+  geom_line(data = crimes_by_year %>% filter(crime_location == "Indoor"), size = 1, linetype = "dashed") + 
+  scale_color_manual(values = c("Outdoor" = "steelblue", "Indoor" = "maroon4")) +
+  scale_linetype_manual(values = c("Outdoor" = "solid", "Indoor" = "dashed")) +  
+  theme_minimal(base_size = 14) + 
+  theme(
+    plot.title = element_text(size = 13),
+    axis.title = element_text(size = 10),
+    plot.caption = element_text(size = 6),
+    axis.text.x = element_text(angle = 0, hjust = 1),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    legend.position = "bottom",
+    legend.title = element_text(size = 9) 
+  ) + 
+  labs(title = "Increased transport options have not reduced outdoor crime in Hyde Park",
+       caption = "Source: City of Chicago Crime Data",
+       x = "Years",
+       y = "Frequency of Crimes",
+       color = "Location of Crime") +
+  geom_vline(xintercept = 2021, linetype = "dashed", color = "deeppink") +
+  geom_vline(xintercept = 2017, linetype = "dashed", color = "maroon") +
+  annotate("text", x = 2021, y = max(crimes_by_year$n), label = "Lyft Program starts", 
+           hjust = 1.1, vjust = 2, color = "deeppink", angle = 0, size = 3, fontface = "italic") +
+  annotate("text", x = 2017, y = max(crimes_by_year$n), label = "UGO Shuttles expand", 
+           hjust = 1.1, vjust = 2, color = "maroon", angle = 0, size = 3, fontface = "italic")
+```
+
+
+```{r}
+#load data
+crime_lat_long_data <- readRDS("data/crime_lat_long.rds")
+university_poi_data <- readRDS("data/university_poi.rds")
+residence_poi_data <- readRDS("data/residence_poi.rds")
+bus_routes_data <- readRDS("data/bus_routes.rds")
+uchicago_shuttles_data <- readRDS("data/uchicago_shuttles.rds")
+
+inputPanel(
+  sliderInput("selectedYear", "Year", 
+              min = 2014, max = 2023,
+              value = 2023, step = 1, sep = ""),
+  checkboxInput("showCTABusRoutes", "CTA Buses (171 and 172)", value = TRUE),
+  checkboxInput("showUChicagoShuttleRoutes", "UChicago Shuttles", value = TRUE)
+)
+
+leafletOutput("hydeParkMap2", width = "100%", height = "500px")
+
+# Generate heatmaps
+years_list <- unique(crime_lat_long_data$year)
+crime_lat_long_data_filtered <- crime_lat_long_data %>% 
+    filter(count >= 3)
+  
+pre_generated_heatmaps <- lapply(years_list, function(year) {
+    heatmap_data <- crime_lat_long_data_filtered[crime_lat_long_data_filtered$year == year, ]
+    heatmap_map <- leaflet(heatmap_data) %>%
+      addProviderTiles(providers$CartoDB.Positron) %>%
+      addHeatmap(lng = ~longitude, lat = ~latitude, intensity = ~count, radius = 15, blur = 20, max = 0.05)
+    saveRDS(heatmap_map, paste0("data/heatmap_", year, ".rds"))
+})
+
+output$hydeParkMap2 <- renderLeaflet({
+    selected_year <- input$selectedYear
+    heatmap_file_path <- paste0("data/heatmap_", selected_year, ".rds")
+    
+    if (file.exists(heatmap_file_path)) {
+      leaflet_map <- readRDS(heatmap_file_path)
+    } else {
+      leaflet_map <- leaflet() %>%
+        addProviderTiles(providers$CartoDB.Positron) %>%
+        setView(lng = -87.5903, lat = 41.7943, zoom = 14)
+    }
+
+    # Adding bus routes and shuttles layers
+    if (input$showCTABusRoutes && !is.null(bus_routes_data)) {
+      leaflet_map <- leaflet_map %>%
+        addPolylines(data = bus_routes_data,
+                     color = 'darkred',
+                     weight = 2,
+                     opacity = 1)
+    }
+
+    if (input$showUChicagoShuttleRoutes && !is.null(uchicago_shuttles_data)) {
+      convert_xyz_to_xy <- function(geometry) {
+        # Extract coordinates and remove the Z dimension
+        coords <- st_coordinates(geometry)
+        coords <- coords[, 1:2] # Keep only X and Y
+        
+        # Create a new LineString or MultiLineString without the Z dimension
+        if (st_geometry_type(geometry) == "MULTILINESTRING") {
+          st_multilinestring(list(coords))
+        } else {
+          st_linestring(coords)
+        }
+      }
+      uchicago_shuttles_data_xy <- st_sfc(lapply(st_geometry(uchicago_shuttles_data), convert_xyz_to_xy), crs = st_crs(uchicago_shuttles_data))
+      uchicago_shuttles_new <- st_sf(st_drop_geometry(uchicago_shuttles_data), geometry = uchicago_shuttles_data_xy)
+      
+      leaflet_map <- leaflet_map %>%
+        addPolylines(data = uchicago_shuttles_new,
+                     color = 'darkblue',
+                     weight = 2,
+                     opacity = 1)
+    }
+
+    # Adding legends
+    crime_color_palette <- colorNumeric(
+      palette = c('#0000FF', '#00FFFF', '#00FF00', '#FFFF00', '#FFA500', '#FF0000'),
+      domain = crime_lat_long_data_filtered$count
+    )
+
+    leaflet_map %>%
+      addLegend(position = "bottomright",
+                title = "Number of Crimes",
+                pal = crime_color_palette,
+                values = crime_lat_long_data_filtered$count,
+                opacity = 1)
+})
+```

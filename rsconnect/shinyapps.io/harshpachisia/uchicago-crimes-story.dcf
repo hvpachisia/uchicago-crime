@@ -1,0 +1,13 @@
+name: uchicago-crimes-story
+title: uchicago-crimes-story
+username: harshpachisia
+account: harshpachisia
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 11398206
+bundleId: 8330483
+url: https://harshpachisia.shinyapps.io/uchicago-crimes-story/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE
+ignoredFiles: cleaning_data.R|Final Paper.docx|final_visualization.Rmd|heatmap_generation.R|poi_map.R|README.html|README.md|routes.R|source_code.Rmd
